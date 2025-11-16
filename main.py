@@ -4,7 +4,7 @@ import ale_py
 gym.register_envs(ale_py)
 
 # Initialise the environment
-env = gym.make("ALE/Kaboom-v5", render_mode="human")
+env = gym.make("ALE/Tetris-v5", render_mode="human")
 
 # Reset the environment to generate the first observation
 observation, info = env.reset(seed=42)
