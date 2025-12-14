@@ -1,11 +1,11 @@
 import math
 import os
 import random
-from enum import Enum
-from typing import NamedTuple
-
 import numpy
 import pygame
+
+from enum import Enum
+from typing import NamedTuple
 from PIL import Image
 from pygame import Surface
 
@@ -38,10 +38,10 @@ class KaboomConstants(NamedTuple):
     BOMB_BUCKET_EXPLODE_STATES: int = 12  # bomb animations count 4 + 4 + 4
     BACKGROUND_STATES: int = 32  # background flickers 16 times 2 frames each
     DEFAULT_STATE: int = -1
-    MAXIMUM_SCORE: int = 2_000#999_999
+    MAXIMUM_SCORE: int = 999_999
     BOMBS_COUNT_GROUPS: tuple[int,int,int,int,int,int,int,int] = (10, 20, 30, 40, 50, 75, 100, 150) # bombs count
     MAD_BOMBER_SPEED_GROUPS: tuple[int,int,int,int,int,int,int,int] = (1, 2, 2, 3, 3, 4, 4, 4) # in px
-    BOMB_SPEED_GROUPS: tuple[int,int,int,int,int,int,int,int] = (1, 1, 2, 2, 3, 3, 3, 4) # in px[36, 18, 18, 10, 12, 6, 6, 3]
+    BOMB_SPEED_GROUPS: tuple[int,int,int,int,int,int,int,int] = (1, 1, 2, 2, 3, 3, 3, 4) # in px
     BOMB_INTERVAL_PX_GROUPS: tuple[int,int,int,int,int,int,int,int] = (36, 18, 18, 10, 12, 6, 6, 3) # in frames
     # INITIAL_BOMBER_POS depends on background pos
 
@@ -61,9 +61,13 @@ class KaboomState(NamedTuple):
     mad_bomber_pos_x: int
     mad_bomber_pos_y: int
     mad_bomber_going_left: bool
+    mad_bomber_motion_counter: int
     bombs_states: list[tuple[
         int, int, int, int, int, int, int]]  # x, y, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
     buckets_pos: list[tuple[int, int]]  # x, y
+    buckets_moving_state: int
+    buckets_jitter_state: int
+    buckets_wasMovingRight: bool
     score: int
     lives: int
     level: int
@@ -114,6 +118,7 @@ def _reset(consts: KaboomConstants):
         mad_bomber_pos_x=mad_bomber_pos_x,
         mad_bomber_pos_y=mad_bomber_pos_y,
         mad_bomber_going_left=False,
+        mad_bomber_motion_counter=0,
         bombs_states=[],
         buckets_pos=[
             (math.ceil(
@@ -143,6 +148,9 @@ def _reset(consts: KaboomConstants):
              KaboomSharedInformation.bucket_size[1] * 5
             )
         ],
+        buckets_jitter_state=consts.DEFAULT_STATE,
+        buckets_moving_state=consts.DEFAULT_STATE,
+        buckets_wasMovingRight=False,
         score=0,
         lives=3,
         level=1,
@@ -177,17 +185,70 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
         return state, obs
 
     # Update buckets positions
+    buckets_wasMovingRight = state.buckets_wasMovingRight
+    frames_counter = state.frames_counter
     bucket_pos = obs.buckets_pos
+    buckets_jitter_state = state.buckets_jitter_state
+    buckets_moving_state = state.buckets_moving_state
     topleft_allowed_pos_x = KaboomSharedInformation.background_bottom_pos[0] + 10 * consts.DISPLAY_SCALE
     topright_allowed_pos_x = KaboomSharedInformation.background_bottom_pos[0] + KaboomSharedInformation.background_bottom_size[0] - 10 * consts.DISPLAY_SCALE - KaboomSharedInformation.bucket_size[0]
     if not state.bombs_exploding:
         new_x: int = bucket_pos[0].x
+
+        # Input + stickiness
+        if action in [Action.LEFT, Action.RIGHT]:
+            if buckets_moving_state == consts.DEFAULT_STATE:
+                buckets_moving_state = 1
+            else:
+                buckets_moving_state += 1
+
+            if buckets_moving_state > 5:
+                buckets_moving_state = 5
+        else:
+            buckets_moving_state -= 1
+            if buckets_moving_state < 0:
+                buckets_moving_state = consts.DEFAULT_STATE
+
+
         if action == Action.LEFT:
-            new_x = max(topleft_allowed_pos_x,
-                        bucket_pos[0].x - consts.BUCKET_SPEED_X * consts.DISPLAY_SCALE)
+            buckets_wasMovingRight = False
         elif action == Action.RIGHT:
-            new_x = min(topright_allowed_pos_x,
-                        bucket_pos[0].x + consts.BUCKET_SPEED_X * consts.DISPLAY_SCALE)
+            buckets_wasMovingRight = True
+
+
+        cur_speed: int
+        if buckets_moving_state == consts.DEFAULT_STATE:
+            cur_speed = 0
+        else:
+            cur_speed = int((consts.BUCKET_SPEED_X * consts.DISPLAY_SCALE) * (buckets_moving_state / 5))
+            if not buckets_wasMovingRight:
+                cur_speed = -cur_speed
+
+
+        if buckets_wasMovingRight:
+            new_x = min(topright_allowed_pos_x, bucket_pos[0].x + cur_speed)
+        else:
+            new_x = max(topleft_allowed_pos_x, bucket_pos[0].x + cur_speed)
+
+
+        # bucket jittering
+        if buckets_jitter_state == consts.DEFAULT_STATE:
+            if frames_counter % 100 == 0:
+                if random.randint(1, 3) == 3:
+                    buckets_jitter_state = 0
+        else:
+            if frames_counter % 2 == 0:
+                if buckets_jitter_state != consts.DEFAULT_STATE:
+                    if buckets_jitter_state in [0, 1, 8, 9, 16, 17]:
+                        new_x -= consts.DISPLAY_SCALE
+                    elif buckets_jitter_state in [2, 3, 10, 11, 18, 19]:
+                        new_x += consts.DISPLAY_SCALE
+                buckets_jitter_state += 1
+            if buckets_jitter_state == 29:
+                buckets_jitter_state = consts.DEFAULT_STATE
+
+
+        # update buckets pos
         new_bucket_pos = []
         for i in range(len(bucket_pos)):
             new_bucket_pos.append(EntityPosition(new_x, bucket_pos[i].y))
@@ -206,7 +267,6 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
     bombs_falling_and_exploding = state.bombs_falling_and_exploding
     bombs_dropped = state.bombs_dropped
     level = state.level
-    frames_counter = state.frames_counter
     if bombs_falling_and_exploding:
         for i in range(len(obs.bombs)):
             bomb_new_position = obs.bombs[i][0]
@@ -316,18 +376,27 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
             level = state.level + 1
 
     # Update mad bomber
+    mad_bomber_motion_counter = state.mad_bomber_motion_counter
     mad_bomber_pos_x = state.mad_bomber_pos_x
     mad_bomber_going_left = state.mad_bomber_going_left
     if bombs_dropped < consts.BOMBS_COUNT_GROUPS[_get_group_index(level)] and not level_finished:
-        if mad_bomber_going_left:
-            mad_bomber_pos_x -= consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * consts.DISPLAY_SCALE
-        else:
-            mad_bomber_pos_x += consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * consts.DISPLAY_SCALE
+        if mad_bomber_motion_counter != 0:
+            if mad_bomber_going_left:
+                mad_bomber_pos_x -= consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * consts.DISPLAY_SCALE
+            else:
+                mad_bomber_pos_x += consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * consts.DISPLAY_SCALE
+
+        if mad_bomber_motion_counter // 18 == 1:
+            mad_bomber_motion_counter = 0
+            mad_bomber_going_left = bool(random.randint(0, 1))
 
         if mad_bomber_pos_x >= topright_allowed_pos_x:
             mad_bomber_going_left = True
         elif mad_bomber_pos_x <= topleft_allowed_pos_x:
             mad_bomber_going_left = False
+
+        mad_bomber_motion_counter += [1, 1, 2, 2, 3, 3, 4, 4][_get_group_index(level)]
+
 
     frames_counter += 1
     obs = KaboomObservation(
@@ -343,9 +412,13 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
         mad_bomber_pos_x=obs.mad_bomber_pos.x,
         mad_bomber_pos_y=obs.mad_bomber_pos.y,
         mad_bomber_going_left=mad_bomber_going_left,
+        mad_bomber_motion_counter=mad_bomber_motion_counter,
         bombs_states=[(bomb_state[0].x, bomb_state[0].y, bomb_state[1], bomb_state[2], bomb_state[3], bomb_state[4], bomb_state[5]) for
                       bomb_state in obs.bombs],
         buckets_pos=[EntityPosition(x=pos[0], y=pos[1]) for pos in state.buckets_pos],
+        buckets_jitter_state=buckets_jitter_state,
+        buckets_moving_state=buckets_moving_state,
+        buckets_wasMovingRight=buckets_wasMovingRight,
         score=obs.score,
         lives=obs.lives,
         level=level,
