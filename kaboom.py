@@ -1,4 +1,3 @@
-import math
 import os
 import random
 import numpy
@@ -9,12 +8,7 @@ from typing import NamedTuple
 from PIL import Image
 from pygame import Surface
 
-
-# Entity class
-class EntityPosition(NamedTuple):
-    x: int
-    y: int
-
+DISPLAY_SCALE = 4
 
 # Game sprites
 class KaboomSprites(NamedTuple):
@@ -32,10 +26,11 @@ class KaboomSprites(NamedTuple):
 class KaboomConstants(NamedTuple):
     BUCKET_SPEED_X: int = 5  # in px
     BUCKET_X_OFFSET: int = 40  # in px
-    DISPLAY_SCALE: int = 4
     BOMB_FUSE_STATES: int = 3  # bomb fuse animations count
     BOMB_EXPLODE_STATES: int = 11  # bomb animations count 4 + 4 + 3
     BOMB_BUCKET_EXPLODE_STATES: int = 12  # bomb animations count 4 + 4 + 4
+    BOMB_SPAWN_HELP_VALUE_Y: int = 20
+    BOMB_SIZE: tuple[int, int] = (5, 12)
     BACKGROUND_STATES: int = 32  # background flickers 16 times 2 frames each
     DEFAULT_STATE: int = -1
     MAXIMUM_SCORE: int = 999_999
@@ -44,15 +39,34 @@ class KaboomConstants(NamedTuple):
     MAD_BOMBER_RANDOMNESS_NUMBERS: tuple[int, int, int, int, int, int, int, int] = (1, 1, 2, 2, 3, 3, 4, 4) # just numbers
     BOMB_SPEED_GROUPS: tuple[int,int,int,int,int,int,int,int] = (1, 1, 2, 2, 3, 3, 3, 4) # in px
     BOMB_INTERVAL_PX_GROUPS: tuple[int,int,int,int,int,int,int,int] = (36, 18, 18, 10, 12, 6, 6, 3) # in frames
-    # INITIAL_BOMBER_POS depends on background pos
+    BACKGROUND_SIZE: tuple[int, int] = (160, 210)
+    CUR_BACKGROUND_TOP: tuple[int, int] = (160, 210)
+    BACKGROUND_TOP_SIZE: tuple[int, int] = (144, 40)
+    BACKGROUND_TOP_POS: tuple[int, int] = (8, 7)
+    CUR_BACKGROUND_BOTTOM: tuple[int, int] = (144, 142)
+    BACKGROUND_BOTTOM_SIZE: tuple[int, int] = (144, 142)
+    BACKGROUND_BOTTOM_POS: tuple[int, int] = (8, 47)
+    BUCKET_SIZE: tuple[int, int] = (14, 8)
+    BOTTOM_EDGE_Y: int = 189
+    MAD_BOMBER_SIZE: tuple[int, int] = (7, 30)
+    MAD_BOMBER_POS_X: int = 22
+    MAD_BOMBER_POS_Y: int = 19
+    BUCKET_THREE_POS_X: int = 73
+    BUCKET_THREE_POS_Y: int = 180
+    BUCKET_TWO_POS_X: int = 73
+    BUCKET_TWO_POS_Y: int = 164
+    BUCKET_ONE_POS_X: int = 73
+    BUCKET_ONE_POS_Y: int = 148
+    TOPLEFT_ALLOWED_POS_X: int = 18
+    TOPLEFT_ALLOWED_POS_Y: int = 128
 
 
 # Agent's observation
 class KaboomObservation(NamedTuple):
-    mad_bomber_pos: EntityPosition
-    buckets_pos: list[EntityPosition]
+    mad_bomber_pos: tuple[int, int]
+    buckets_pos: list[tuple[int, int]]
     bombs: list[tuple[
-        EntityPosition, int, int, int, int, int]]  # EntityPosition, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
+        tuple[int, int], int, int, int, int, int]]  # EntityPosition, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
     score: int
     lives: int
 
@@ -64,7 +78,7 @@ class KaboomState(NamedTuple):
     mad_bomber_going_left: bool
     mad_bomber_motion_counter: int
     bombs_states: list[tuple[
-        int, int, int, int, int, int, int]]  # x, y, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
+        tuple[int, int], int, int, int, int, int]]  # x, y, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
     buckets_pos: list[tuple[int, int]]  # x, y
     buckets_moving_state: int
     buckets_jitter_state: int
@@ -81,74 +95,34 @@ class KaboomState(NamedTuple):
     level_success: bool
     level_finished: bool
 
-
 class KaboomSharedInformation:
-    scaled_screen_size: tuple[int, int] = (0, 0)
-    background_size: tuple[int, int] = (0, 0)
-    cur_background_top: Surface
-    background_top_size: tuple[int, int] = (0, 0)
-    background_top_pos: tuple[int, int] = (0, 0)
-    cur_background_bottom: Surface
-    background_bottom_size: tuple[int, int] = (0, 0)
-    background_bottom_pos: tuple[int, int] = (0, 0)
-    bucket_size: tuple[int, int] = (0, 0)
-    bottom_edge_y: int = 0
+    cur_background_top: Surface = None
+    cur_background_bottom: Surface = None
 
 
 def _get_observation(state: KaboomState):
     obs = KaboomObservation(
-        mad_bomber_pos=EntityPosition(
-            x=state.mad_bomber_pos_x,
-            y=state.mad_bomber_pos_y
+        mad_bomber_pos=(
+            state.mad_bomber_pos_x,
+            state.mad_bomber_pos_y
         ),
         score=state.score,
         lives=state.lives,
-        buckets_pos=[EntityPosition(x=pos[0], y=pos[1]) for pos in state.buckets_pos],
-        bombs=[],
+        buckets_pos=[(pos[0], pos[1]) for pos in state.buckets_pos],
+        bombs=state.bombs_states,
     )
     return obs
 
 
 def _reset(consts: KaboomConstants):
     consts = consts or KaboomConstants()
-    mad_bomber_pos_x = int(KaboomSharedInformation.background_size[0] / 20) + int(
-        KaboomSharedInformation.background_top_size[0] * 0.1)
-    mad_bomber_pos_y = int(KaboomSharedInformation.background_top_size[1] * 0.3) + int(
-        KaboomSharedInformation.background_size[1] / 30)
     state = KaboomState(
-        mad_bomber_pos_x=mad_bomber_pos_x,
-        mad_bomber_pos_y=mad_bomber_pos_y,
+        mad_bomber_pos_x=consts.MAD_BOMBER_POS_X,
+        mad_bomber_pos_y=consts.MAD_BOMBER_POS_Y,
         mad_bomber_going_left=False,
         mad_bomber_motion_counter=0,
         bombs_states=[],
-        buckets_pos=[
-            (math.ceil(
-                KaboomSharedInformation.background_size[0] / 20 + KaboomSharedInformation.background_top_size[
-                    0] * 0.451),
-             KaboomSharedInformation.background_top_size[1] + KaboomSharedInformation.background_bottom_size[
-                 1] + int(
-                 KaboomSharedInformation.background_size[1] / 30) - consts.DISPLAY_SCALE -
-             KaboomSharedInformation.bucket_size[1]
-            ),
-
-            (math.ceil(
-                KaboomSharedInformation.background_size[0] / 20 + KaboomSharedInformation.background_top_size[
-                    0] * 0.451),
-             KaboomSharedInformation.background_top_size[1] + KaboomSharedInformation.background_bottom_size[
-                 1] + int(
-                 KaboomSharedInformation.background_size[1] / 30) - consts.DISPLAY_SCALE -
-             KaboomSharedInformation.bucket_size[1] * 3
-            ),
-
-            (math.ceil(
-                KaboomSharedInformation.background_size[0] / 20 + KaboomSharedInformation.background_top_size[
-                    0] * 0.451),
-             KaboomSharedInformation.background_top_size[1] + KaboomSharedInformation.background_bottom_size[
-                 1] + int(
-                 KaboomSharedInformation.background_size[1] / 30) - consts.DISPLAY_SCALE -
-             KaboomSharedInformation.bucket_size[1] * 5
-            )
-        ],
+        buckets_pos=[(consts.BUCKET_THREE_POS_X, consts.BUCKET_THREE_POS_Y),(consts.BUCKET_TWO_POS_X, consts.BUCKET_TWO_POS_Y),(consts.BUCKET_ONE_POS_X, consts.BUCKET_ONE_POS_Y)],
         buckets_jitter_state=consts.DEFAULT_STATE,
         buckets_moving_state=consts.DEFAULT_STATE,
         buckets_wereMovingRight=False,
@@ -175,24 +149,20 @@ class Action(Enum):
 def _get_group_index(level: int):
     return max(1, min(8, level)) - 1
 
-def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, action: Action) -> tuple[
+def _step(state: KaboomState, consts: KaboomConstants, action: Action) -> tuple[
     KaboomState, KaboomObservation]:
-    if len(obs.buckets_pos) == 0:
-        print("End. No buckets left")
-        return state, obs
+    if state.lives == 0:
+        return state, _get_observation(state)
 
     if state.score >= consts.MAXIMUM_SCORE:
-        print("End. Maximum score achieved")
-        return state, obs
+        return state, _get_observation(state)
 
     # Update buckets positions
     buckets_wereMovingRight = state.buckets_wereMovingRight
     frames_counter = state.frames_counter
-    bucket_pos = obs.buckets_pos
+    buckets_pos = state.buckets_pos
     buckets_jitter_state = state.buckets_jitter_state
     buckets_moving_state = state.buckets_moving_state
-    topleft_allowed_pos_x = KaboomSharedInformation.background_bottom_pos[0] + 10 * consts.DISPLAY_SCALE
-    topright_allowed_pos_x = KaboomSharedInformation.background_bottom_pos[0] + KaboomSharedInformation.background_bottom_size[0] - 10 * consts.DISPLAY_SCALE - KaboomSharedInformation.bucket_size[0]
     if not state.bombs_exploding:
         new_x: int
 
@@ -221,15 +191,15 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
         if buckets_moving_state == consts.DEFAULT_STATE:
             cur_speed = 0
         else:
-            cur_speed = int((consts.BUCKET_SPEED_X * consts.DISPLAY_SCALE) * (buckets_moving_state / 5))
+            cur_speed = int((consts.BUCKET_SPEED_X * 1) * (buckets_moving_state / 5))
             if not buckets_wereMovingRight:
                 cur_speed = -cur_speed
 
 
         if buckets_wereMovingRight:
-            new_x = min(topright_allowed_pos_x, bucket_pos[0].x + cur_speed)
+            new_x = min(consts.TOPLEFT_ALLOWED_POS_Y, buckets_pos[0][0] + cur_speed)
         else:
-            new_x = max(topleft_allowed_pos_x, bucket_pos[0].x + cur_speed)
+            new_x = max(consts.TOPLEFT_ALLOWED_POS_X, buckets_pos[0][0] + cur_speed)
 
 
         # bucket jittering
@@ -241,9 +211,9 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
             if frames_counter % 2 == 0:
                 if buckets_jitter_state != consts.DEFAULT_STATE:
                     if buckets_jitter_state in [0, 1, 8, 9, 16, 17]:
-                        new_x -= consts.DISPLAY_SCALE
+                        new_x -= 1
                     elif buckets_jitter_state in [2, 3, 10, 11, 18, 19]:
-                        new_x += consts.DISPLAY_SCALE
+                        new_x += 1
                 buckets_jitter_state += 1
             if buckets_jitter_state == 29:
                 buckets_jitter_state = consts.DEFAULT_STATE
@@ -251,53 +221,52 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
 
         # update buckets pos
         new_bucket_pos = []
-        for i in range(len(bucket_pos)):
-            new_bucket_pos.append(EntityPosition(new_x, bucket_pos[i].y))
-        bucket_pos = new_bucket_pos
+        for i in range(len(buckets_pos)):
+            new_bucket_pos.append((new_x, buckets_pos[i][1]))
+        buckets_pos = new_bucket_pos
 
 
     # Update bombs
     bomb_to_remove = None
     other_bomb_exploding: bool = False
 
-    score = obs.score
-    lives = obs.lives
+    score = state.score
+    lives = state.lives
     bombs_should_explode: bool = state.bombs_exploding
     level_finished: bool = state.level_finished
     level_success = state.level_success
     bombs_falling_and_exploding = state.bombs_falling_and_exploding
     bombs_dropped = state.bombs_dropped
     level = state.level
+    bombs = state.bombs_states
     if bombs_falling_and_exploding:
-        for i in range(len(obs.bombs)):
-            bomb_new_position = obs.bombs[i][0]
-            new_fuse_anim = obs.bombs[i][1]
+        for i in range(len(bombs)):
+            bomb_new_position = bombs[i][0]
+            new_fuse_anim = bombs[i][1]
 
             # Check for explosion if bottom is reached
-            if (obs.bombs[i][0].y + KaboomSprites.bombs[0].get_size()[
-                1]) >= KaboomSharedInformation.bottom_edge_y:
+            if (bombs[i][0][1] + consts.BOMB_SIZE[
+                1]) >= consts.BOTTOM_EDGE_Y:
                 bombs_should_explode = True
                 level_finished = True
                 level_success = False
 
             bomb_explode_state: int = consts.DEFAULT_STATE
             if bombs_should_explode:
-                bomb_new_position = obs.bombs[i][0]
-                new_fuse_anim = obs.bombs[i][1]
                 if not other_bomb_exploding:
-                    bomb_explode_state = obs.bombs[i][3] + 1
+                    bomb_explode_state = bombs[i][3] + 1
                 other_bomb_exploding = True
 
 
             # Check for explosion if bucket is reached
-            bucket_index = obs.bombs[i][5]
-            bomb_bucket_explode_state = obs.bombs[i][4]
+            bucket_index = bombs[i][5]
+            bomb_bucket_explode_state = bombs[i][4]
             if bomb_bucket_explode_state == consts.DEFAULT_STATE:
                 bucket_index = 0  # 2 = the top-most
-                for bucket in obs.buckets_pos:
-                    if ((obs.bombs[i][0].y + KaboomSprites.bombs[0].get_size()[1]) >= bucket.y
-                            and (obs.bombs[i][0].x + KaboomSprites.bombs[0].get_size()[0]) >= bucket.x
-                            and obs.bombs[i][0].x <= bucket.x + KaboomSharedInformation.bucket_size[0]):
+                for bucket in state.buckets_pos:
+                    if ((bombs[i][0][1] + consts.BOMB_SIZE[1]) >= bucket[1]
+                            and (bombs[i][0][0] + consts.BOMB_SIZE[0]) >= bucket[0]
+                            and bombs[i][0][0] <= bucket[0] + consts.BUCKET_SIZE[0]):
                         score += level
                         bomb_bucket_explode_state = 0
                         break
@@ -305,60 +274,56 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
 
             if bomb_bucket_explode_state != consts.DEFAULT_STATE:
                 bomb_bucket_explode_state += 1
-                bomb_new_position = obs.bombs[i][0]
-                new_fuse_anim = obs.bombs[i][1]
+                bomb_new_position = bombs[i][0]
+                new_fuse_anim = bombs[i][1]
 
 
             # Update the state of the current bomb
             if not bombs_should_explode and bomb_bucket_explode_state == consts.DEFAULT_STATE:
-                bomb_new_position = EntityPosition(
-                    x=obs.bombs[i][0].x,
-                    y=obs.bombs[i][0].y + consts.DISPLAY_SCALE * consts.BOMB_SPEED_GROUPS[_get_group_index(level)]
+                bomb_new_position = (
+                    bombs[i][0][0],
+                    bombs[i][0][1] + 1 * consts.BOMB_SPEED_GROUPS[_get_group_index(level)]
                 )
                 new_fuse_anim = random.randint(0, consts.BOMB_FUSE_STATES - 1)
                 bomb_explode_state = consts.DEFAULT_STATE
                 bomb_bucket_explode_state = consts.DEFAULT_STATE
-                bucket_index = obs.bombs[i][5]
+                bucket_index = bombs[i][5]
 
-            obs.bombs[i] = (bomb_new_position, new_fuse_anim, obs.bombs[i][2], bomb_explode_state,
+            bombs[i] = (bomb_new_position, new_fuse_anim, bombs[i][2], bomb_explode_state,
                             bomb_bucket_explode_state, bucket_index)
 
             # Mark the bomb to be removed
             if bomb_explode_state >= consts.BOMB_EXPLODE_STATES or bomb_bucket_explode_state >= consts.BOMB_BUCKET_EXPLODE_STATES:
-                bomb_to_remove = obs.bombs[i]
+                bomb_to_remove = bombs[i]
 
+        # Dropping new bombs
         if bombs_dropped < consts.BOMBS_COUNT_GROUPS[_get_group_index(level)]:
             if not level_finished:
                 if frames_counter % consts.BOMB_INTERVAL_PX_GROUPS[_get_group_index(level)] == 0:
-                    obs.bombs.append(
-                        (EntityPosition(
-                            x=obs.mad_bomber_pos.x + consts.DISPLAY_SCALE,
-                            y=obs.mad_bomber_pos.y + int((KaboomSprites.mad_bomber.get_size()[
-                                                              1] - 4 * consts.DISPLAY_SCALE) / 2) + 7 * consts.DISPLAY_SCALE),
+                    bombs.append(
+                        ((state.mad_bomber_pos_x + 1,state.mad_bomber_pos_y + consts.BOMB_SPAWN_HELP_VALUE_Y),
                          0, random.randint(0, 1), consts.DEFAULT_STATE, consts.DEFAULT_STATE, consts.DEFAULT_STATE))
                     bombs_dropped += 1
-        else:
-            if len(obs.bombs) == 0:
+        elif len(bombs) == 0:
                 level_finished = True
                 level_success = True
 
 
     if bomb_to_remove is not None:
-        obs.bombs.remove(bomb_to_remove)
+        bombs.remove(bomb_to_remove)
 
+    # Background state
     background_state = state.background_state
     background_flickering = state.background_flickering
-    if bombs_should_explode and len(obs.bombs) == 0:
+    if bombs_should_explode and len(bombs) == 0:
         bombs_should_explode = False
         background_flickering = True
         bombs_dropped = 0
 
     if level_finished:
         if not level_success and background_flickering:
-            print(f"background state: {background_state}")
             background_state += 1
             if background_state >= consts.BACKGROUND_STATES:
-                print(f"End background state: {background_state}")
                 bombs_dropped = 0
                 bombs_falling_and_exploding = True
                 level_finished = False
@@ -366,10 +331,10 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
                 background_flickering = False
                 background_state = consts.DEFAULT_STATE
                 lives -= 1
-                bucket_pos.remove(bucket_pos[0])
+                buckets_pos.remove(buckets_pos[0])
                 if level > 1:
                     level -= 1
-        elif level_success and len(obs.bombs) == 0:
+        elif level_success and len(bombs) == 0:
             bombs_dropped = 0
             bombs_falling_and_exploding = True
             level_finished = False
@@ -383,45 +348,38 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
     if bombs_dropped < consts.BOMBS_COUNT_GROUPS[_get_group_index(level)] and not level_finished:
         if mad_bomber_motion_counter != 0:
             if mad_bomber_going_left:
-                mad_bomber_pos_x -= consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * consts.DISPLAY_SCALE
+                mad_bomber_pos_x -= consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * 1
             else:
-                mad_bomber_pos_x += consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * consts.DISPLAY_SCALE
+                mad_bomber_pos_x += consts.MAD_BOMBER_SPEED_GROUPS[_get_group_index(level)] * 1
 
         if mad_bomber_motion_counter // 18 == 1:
             mad_bomber_motion_counter = 0
             mad_bomber_going_left = bool(random.randint(0, 1))
 
-        if mad_bomber_pos_x >= topright_allowed_pos_x:
+        if mad_bomber_pos_x >= consts.TOPLEFT_ALLOWED_POS_Y:
             mad_bomber_going_left = True
-        elif mad_bomber_pos_x <= topleft_allowed_pos_x:
+        elif mad_bomber_pos_x <= consts.TOPLEFT_ALLOWED_POS_X:
             mad_bomber_going_left = False
 
         mad_bomber_motion_counter += consts.MAD_BOMBER_RANDOMNESS_NUMBERS[_get_group_index(level)]
 
 
     frames_counter += 1
-    obs = KaboomObservation(
-        mad_bomber_pos=EntityPosition(mad_bomber_pos_x, obs.mad_bomber_pos.y),
-        score=score,
-        lives=obs.lives,
-        buckets_pos=bucket_pos,
-        bombs=obs.bombs,
-    )
+    lives = len(state.buckets_pos)
 
     # Update state and obs
     state = KaboomState(
-        mad_bomber_pos_x=obs.mad_bomber_pos.x,
-        mad_bomber_pos_y=obs.mad_bomber_pos.y,
+        mad_bomber_pos_x=mad_bomber_pos_x,
+        mad_bomber_pos_y=state.mad_bomber_pos_y,
         mad_bomber_going_left=mad_bomber_going_left,
         mad_bomber_motion_counter=mad_bomber_motion_counter,
-        bombs_states=[(bomb_state[0].x, bomb_state[0].y, bomb_state[1], bomb_state[2], bomb_state[3], bomb_state[4], bomb_state[5]) for
-                      bomb_state in obs.bombs],
-        buckets_pos=[EntityPosition(x=pos[0], y=pos[1]) for pos in state.buckets_pos],
+        bombs_states=bombs,
+        buckets_pos=buckets_pos,
         buckets_jitter_state=buckets_jitter_state,
         buckets_moving_state=buckets_moving_state,
         buckets_wereMovingRight=buckets_wereMovingRight,
-        score=obs.score,
-        lives=obs.lives,
+        score=score,
+        lives=lives,
         level=level,
         frames_counter=frames_counter,
         bombs_dropped=bombs_dropped,
@@ -432,6 +390,8 @@ def _step(state: KaboomState, obs: KaboomObservation, consts: KaboomConstants, a
         level_finished=level_finished,
         level_success=level_success
     )
+    obs = _get_observation(state)
+
     return state, obs
 
 
@@ -461,17 +421,17 @@ def _render(screen: Surface, state: KaboomState, obs: KaboomObservation, consts:
             background_bottom = KaboomSharedInformation.cur_background_bottom
 
     screen.blit(background_border, (0, 0))
-    screen.blit(background_top, KaboomSharedInformation.background_top_pos)
-    screen.blit(background_bottom, KaboomSharedInformation.background_bottom_pos)
+    screen.blit(background_top, consts.BACKGROUND_TOP_POS)
+    screen.blit(background_bottom, consts.BACKGROUND_BOTTOM_POS)
 
     # Draw score
-    score_pos_x = int(KaboomSharedInformation.background_top_pos[0] + KaboomSharedInformation.background_top_size[
-        0] - 60 * consts.DISPLAY_SCALE)
-    score_pos_y = int(KaboomSharedInformation.background_top_pos[1] + consts.DISPLAY_SCALE)
+    score_pos_x = int(consts.BACKGROUND_TOP_POS[0] + consts.BACKGROUND_TOP_SIZE[
+        0] - 60 * 1)
+    score_pos_y = int(consts.BACKGROUND_TOP_POS[1] + 1)
     score = str(obs.score)
 
     for i in reversed(range(len(score))):
-        score_pos_x -= 7 * consts.DISPLAY_SCALE
+        score_pos_x -= 7 * 1
         screen.blit(KaboomSprites.scores[int(score[i])], (score_pos_x, score_pos_y))
 
     # Draw mad bomber
@@ -490,21 +450,20 @@ def _render(screen: Surface, state: KaboomState, obs: KaboomObservation, consts:
             explode_surface_index = int(bomb[4] > 3) + int(bomb[4] > 7)
             bomb_explode_surface = KaboomSprites.bomb_bucket_explode_states[explode_surface_index]
             relevant_bucket = obs.buckets_pos[bomb[5]]
-            screen.blit(bomb_explode_surface, (relevant_bucket.x, relevant_bucket.y - bomb_explode_surface.get_size()[1]))
+            screen.blit(bomb_explode_surface, (relevant_bucket[0], relevant_bucket[1] - bomb_explode_surface.get_size()[1]))
         else:
             # Draw the bomb
             screen.blit(KaboomSprites.bombs[bomb[2]], bomb[0])
 
             # Draw the bombs fuse
             bomb_fuse = KaboomSprites.bomb_fuse_states[bomb[1]]
-            screen.blit(bomb_fuse, (bomb[0].x + 2 * ((bomb[2] + 1) % 2) * consts.DISPLAY_SCALE,
-                                    bomb[0].y - bomb_fuse.get_size()[1]))
+            screen.blit(bomb_fuse, (bomb[0][0] + 2 * ((bomb[2] + 1) % 2) * 1,
+                                    bomb[0][1] - bomb_fuse.get_size()[1]))
 
     # Draw buckets
     for bucket_pos in obs.buckets_pos:
         screen.blit(KaboomSprites.bucket,
-                    EntityPosition(x=bucket_pos.x,
-                                   y=bucket_pos.y))
+                    (bucket_pos[0], bucket_pos[1]))
 
 
 def main():
@@ -516,24 +475,11 @@ def main():
 
     # Load surfaces and get a scaled screen size
     load_surfaces()
-    scale_surfaces(consts)
-    scaled_screen_size: tuple[int, int] = scale_size_tuple((160, 210), consts.DISPLAY_SCALE)
+    screen_size = (160, 210)
+    scaled_screen_size: tuple[int, int] = scale_size_tuple(screen_size, DISPLAY_SCALE)
 
-    # Init shared variables
-    KaboomSharedInformation.scaled_screen_size = scaled_screen_size
-    KaboomSharedInformation.background_size = KaboomSprites.background[2].get_size()
     KaboomSharedInformation.cur_background_top = KaboomSprites.background[0]
-    KaboomSharedInformation.background_top_size = KaboomSprites.background[0].get_size()
-    KaboomSharedInformation.background_top_pos = (int(KaboomSharedInformation.background_size[0] / 20),
-                                                  int(KaboomSharedInformation.background_size[1] / 30))
     KaboomSharedInformation.cur_background_bottom = KaboomSprites.background[1]
-    KaboomSharedInformation.background_bottom_size = KaboomSprites.background[1].get_size()
-    KaboomSharedInformation.background_bottom_pos = (int(KaboomSharedInformation.background_size[0] / 20), int(
-        KaboomSharedInformation.background_top_size[1] + KaboomSharedInformation.background_size[1] / 30))
-    KaboomSharedInformation.bucket_size = KaboomSprites.bucket.get_size()
-    KaboomSharedInformation.bottom_edge_y = int(KaboomSharedInformation.background_size[1] / 30) + \
-                                            KaboomSharedInformation.background_top_size[1] + \
-                                            KaboomSharedInformation.background_bottom_size[1]
 
     # Load game state
     state = _reset(consts)
@@ -543,6 +489,7 @@ def main():
     pygame.init()
     clock = pygame.time.Clock()
     screen = pygame.display.set_mode(scaled_screen_size)
+    fake_screen = Surface(screen_size)
     running = True
 
     paused = False
@@ -554,10 +501,8 @@ def main():
             elif event.type == pygame.KEYUP:
                 if event.key == pygame.K_w:
                     obs.bombs.append(
-                        (EntityPosition(
-                            x=obs.mad_bomber_pos.x + consts.DISPLAY_SCALE,
-                            y=obs.mad_bomber_pos.y + int((KaboomSprites.mad_bomber.get_size()[
-                                                              1] - 4 * consts.DISPLAY_SCALE) / 2) + 7 * consts.DISPLAY_SCALE),
+                        ((obs.mad_bomber_pos[0] + 1, obs.mad_bomber_pos[1] + int((KaboomSprites.mad_bomber.get_size()[
+                                                              1] - 4 * 1) / 2) + 7 * 1),
                          0, random.randint(0, 1), consts.DEFAULT_STATE, consts.DEFAULT_STATE, consts.DEFAULT_STATE))
                 elif event.key == pygame.K_SPACE:
                     if state.level_finished:
@@ -577,11 +522,11 @@ def main():
             continue
 
         # Step
-        state, obs = _step(state, obs, consts, action)
+        state, obs = _step(state, consts, action)
 
         # Render
-        _render(screen, state, obs, consts)
-
+        _render(fake_screen, state, obs, consts)
+        screen.blit(pygame.transform.scale(fake_screen, screen.get_rect().size), (0, 0))
         pygame.display.flip()
         clock.tick(30)
 
@@ -627,52 +572,6 @@ def load_surfaces():
         pygame.image.load("sprites/score8.png"),
         pygame.image.load("sprites/score9.png")
     ]
-
-
-def scale_surfaces(consts: KaboomConstants):
-    KaboomSprites.background = [
-        _scale_surface(KaboomSprites.background[0], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.background[1], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.background[2], consts.DISPLAY_SCALE)
-    ]
-    KaboomSprites.mad_bomber = _scale_surface(KaboomSprites.mad_bomber, consts.DISPLAY_SCALE)
-    KaboomSprites.bucket = _scale_surface(KaboomSprites.bucket, consts.DISPLAY_SCALE)
-    KaboomSprites.bombs = [
-        _scale_surface(KaboomSprites.bombs[0], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bombs[1], consts.DISPLAY_SCALE)
-    ]
-    KaboomSprites.bomb_fuse_states = [
-        _scale_surface(KaboomSprites.bomb_fuse_states[0], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bomb_fuse_states[1], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bomb_fuse_states[2], consts.DISPLAY_SCALE)
-    ]
-    KaboomSprites.bomb_explode_states = [
-        _scale_surface(KaboomSprites.bomb_explode_states[0], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bomb_explode_states[1], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bomb_explode_states[2], consts.DISPLAY_SCALE)
-    ]
-    KaboomSprites.bomb_bucket_explode_states = [
-        _scale_surface(KaboomSprites.bomb_bucket_explode_states[0], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bomb_bucket_explode_states[1], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.bomb_bucket_explode_states[2], consts.DISPLAY_SCALE)
-    ]
-    KaboomSprites.scores = [
-        _scale_surface(KaboomSprites.scores[0], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[1], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[2], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[3], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[4], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[5], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[6], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[7], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[8], consts.DISPLAY_SCALE),
-        _scale_surface(KaboomSprites.scores[9], consts.DISPLAY_SCALE)
-    ]
-
-
-def _scale_surface(surface: Surface, scale: int):
-    size = surface.get_size()
-    return pygame.transform.scale(surface, (size[0] * scale, size[1] * scale))
 
 
 def scale_size_tuple(display_size: tuple[int, int], scale: int) -> tuple[int, int]:
