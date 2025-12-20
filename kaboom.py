@@ -66,7 +66,7 @@ class KaboomObservation(NamedTuple):
     mad_bomber_pos: tuple[int, int]
     buckets_pos: list[tuple[int, int]]
     bombs: list[tuple[
-        tuple[int, int], int, int, int, int, int]]  # EntityPosition, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
+        tuple[int, int], int, int, int, int, int, int]]  # EntityPosition, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index, explodes_in
     score: int
     lives: int
 
@@ -78,7 +78,7 @@ class KaboomState(NamedTuple):
     mad_bomber_going_left: bool
     mad_bomber_motion_counter: int
     bombs_states: list[tuple[
-        tuple[int, int], int, int, int, int, int]]  # x, y, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index
+        tuple[int, int], int, int, int, int, int, int]]  # x, y, bomb_fuse_anim_state, bomb_type, explode_state, explode_bucket_state, on_bucket_index, explodes_in
     buckets_pos: list[tuple[int, int]]  # x, y
     buckets_moving_state: int
     buckets_jitter_state: int
@@ -126,7 +126,7 @@ def _reset(consts: KaboomConstants):
         buckets_jitter_state=consts.DEFAULT_STATE,
         buckets_moving_state=consts.DEFAULT_STATE,
         buckets_wereMovingRight=False,
-        score=0,
+        score=1234,
         lives=3,
         level=1,
         bombs_dropped=0,
@@ -209,11 +209,10 @@ def _step(state: KaboomState, consts: KaboomConstants, action: Action) -> tuple[
                     buckets_jitter_state = 0
         else:
             if frames_counter % 2 == 0:
-                if buckets_jitter_state != consts.DEFAULT_STATE:
-                    if buckets_jitter_state in [0, 1, 8, 9, 16, 17]:
-                        new_x -= 1
-                    elif buckets_jitter_state in [2, 3, 10, 11, 18, 19]:
-                        new_x += 1
+                if buckets_jitter_state in [0, 1, 8, 9, 16, 17]:
+                    new_x -= 1
+                elif buckets_jitter_state in [2, 3, 10, 11, 18, 19]:
+                    new_x += 1
                 buckets_jitter_state += 1
             if buckets_jitter_state == 29:
                 buckets_jitter_state = consts.DEFAULT_STATE
@@ -228,8 +227,6 @@ def _step(state: KaboomState, consts: KaboomConstants, action: Action) -> tuple[
 
     # Update bombs
     bomb_to_remove = None
-    other_bomb_exploding: bool = False
-
     score = state.score
     lives = state.lives
     bombs_should_explode: bool = state.bombs_exploding
@@ -240,28 +237,26 @@ def _step(state: KaboomState, consts: KaboomConstants, action: Action) -> tuple[
     level = state.level
     bombs = state.bombs_states
     if bombs_falling_and_exploding:
+        # Dropping new bombs
+        if bombs_dropped < consts.BOMBS_COUNT_GROUPS[_get_group_index(level)]:
+            if not level_finished:
+                if frames_counter % consts.BOMB_INTERVAL_PX_GROUPS[_get_group_index(level)] == 0:
+                    bombs.append(
+                        ((state.mad_bomber_pos_x + 1,state.mad_bomber_pos_y + consts.BOMB_SPAWN_HELP_VALUE_Y),
+                         0, random.randint(0, 1), consts.DEFAULT_STATE, consts.DEFAULT_STATE, consts.DEFAULT_STATE, -1))
+                    bombs_dropped += 1
+        elif len(bombs) == 0:
+                level_finished = True
+                level_success = True
+
         for i in range(len(bombs)):
             bomb_new_position = bombs[i][0]
             new_fuse_anim = bombs[i][1]
 
-            # Check for explosion if bottom is reached
-            if (bombs[i][0][1] + consts.BOMB_SIZE[
-                1]) >= consts.BOTTOM_EDGE_Y:
-                bombs_should_explode = True
-                level_finished = True
-                level_success = False
-
-            bomb_explode_state: int = consts.DEFAULT_STATE
-            if bombs_should_explode:
-                if not other_bomb_exploding:
-                    bomb_explode_state = bombs[i][3] + 1
-                other_bomb_exploding = True
-
-
             # Check for explosion if bucket is reached
             bucket_index = bombs[i][5]
             bomb_bucket_explode_state = bombs[i][4]
-            if bomb_bucket_explode_state == consts.DEFAULT_STATE:
+            if not bombs_should_explode and bomb_bucket_explode_state == consts.DEFAULT_STATE:
                 bucket_index = 0  # 2 = the top-most
                 for bucket in state.buckets_pos:
                     if ((bombs[i][0][1] + consts.BOMB_SIZE[1]) >= bucket[1]
@@ -274,11 +269,10 @@ def _step(state: KaboomState, consts: KaboomConstants, action: Action) -> tuple[
 
             if bomb_bucket_explode_state != consts.DEFAULT_STATE:
                 bomb_bucket_explode_state += 1
-                bomb_new_position = bombs[i][0]
-                new_fuse_anim = bombs[i][1]
 
 
             # Update the state of the current bomb
+            bomb_explode_state = bombs[i][3]
             if not bombs_should_explode and bomb_bucket_explode_state == consts.DEFAULT_STATE:
                 bomb_new_position = (
                     bombs[i][0][0],
@@ -290,24 +284,40 @@ def _step(state: KaboomState, consts: KaboomConstants, action: Action) -> tuple[
                 bucket_index = bombs[i][5]
 
             bombs[i] = (bomb_new_position, new_fuse_anim, bombs[i][2], bomb_explode_state,
-                            bomb_bucket_explode_state, bucket_index)
+                            bomb_bucket_explode_state, bucket_index, bombs[i][6])
+
+        for i in range(len(bombs)):
+            # Check for explosion if bottom is reached
+            if not bombs_should_explode and (bombs[i][0][1] + consts.BOMB_SIZE[1]) >= consts.BOTTOM_EDGE_Y:
+                bombs_should_explode = True
+                for j in range(len(bombs)):
+                    bombs[j] = (bombs[j][0], bombs[j][1], bombs[j][2], bombs[j][3],
+                                bombs[j][4], bombs[j][5], 12*j)
+                level_finished = True
+                level_success = False
+
+        for i in range(len(bombs)):
+            explodes_in = bombs[i][6]
+            bomb_explode_state = bombs[i][3]
+            bomb_bucket_explode_state = bombs[i][4]
+            if bombs_should_explode:
+                if explodes_in == 0:
+                    bomb_explode_state += 1
+
+            if explodes_in > 0:
+                explodes_in -= 1
+
+            bombs[i] = (bombs[i][0], bombs[i][1], bombs[i][2], bomb_explode_state,
+                        bomb_bucket_explode_state, bombs[i][5], explodes_in)
 
             # Mark the bomb to be removed
             if bomb_explode_state >= consts.BOMB_EXPLODE_STATES or bomb_bucket_explode_state >= consts.BOMB_BUCKET_EXPLODE_STATES:
                 bomb_to_remove = bombs[i]
 
-        # Dropping new bombs
-        if bombs_dropped < consts.BOMBS_COUNT_GROUPS[_get_group_index(level)]:
-            if not level_finished:
-                if frames_counter % consts.BOMB_INTERVAL_PX_GROUPS[_get_group_index(level)] == 0:
-                    bombs.append(
-                        ((state.mad_bomber_pos_x + 1,state.mad_bomber_pos_y + consts.BOMB_SPAWN_HELP_VALUE_Y),
-                         0, random.randint(0, 1), consts.DEFAULT_STATE, consts.DEFAULT_STATE, consts.DEFAULT_STATE))
-                    bombs_dropped += 1
-        elif len(bombs) == 0:
-                level_finished = True
-                level_success = True
-
+        s = ""
+        for i in range(len(bombs)):
+            s += str(bombs[i][6]) + " "
+        print(s)
 
     if bomb_to_remove is not None:
         bombs.remove(bomb_to_remove)
@@ -444,7 +454,6 @@ def _render(screen: Surface, state: KaboomState, obs: KaboomObservation, consts:
             explode_surface_index = int(bomb[3] > 3) + int(bomb[3] > 7)
             bomb_explode_surface = KaboomSprites.bomb_explode_states[explode_surface_index].convert_alpha()
             bomb_explode_surface.fill(_get_random_color(), special_flags=pygame.BLEND_RGBA_MIN)
-
             screen.blit(bomb_explode_surface, obs.bombs[0][0])
         elif bomb[4] != consts.DEFAULT_STATE:
             explode_surface_index = int(bomb[4] > 3) + int(bomb[4] > 7)
@@ -503,7 +512,7 @@ def main():
                     obs.bombs.append(
                         ((obs.mad_bomber_pos[0] + 1, obs.mad_bomber_pos[1] + int((KaboomSprites.mad_bomber.get_size()[
                                                               1] - 4 * 1) / 2) + 7 * 1),
-                         0, random.randint(0, 1), consts.DEFAULT_STATE, consts.DEFAULT_STATE, consts.DEFAULT_STATE))
+                         0, random.randint(0, 1), consts.DEFAULT_STATE, consts.DEFAULT_STATE, consts.DEFAULT_STATE, -1))
                 elif event.key == pygame.K_SPACE:
                     if state.level_finished:
                         state = state._replace(bombs_falling=True, level_finished=False)
